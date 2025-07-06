@@ -29,6 +29,8 @@
 
 #define REG_DISCRETE_SIZE     16
 
+#define  MIN_DEAD_TIME    5
+                   
 
 uint16_t usRegInputBuf[REG_INPUT_NREGS] = {0x1000,0x1001,0x1002,0x1003,0x1004,0x1005,0x1006,0x1007};
 
@@ -51,7 +53,15 @@ uint16_t last_pwm_frequency = 0;//compare with pwm_frequency
 uint16_t paramA, paramB, paramC;
 uint16_t phaseB, phaseC;
 uint16_t pwm_freq, mix_count;
-uint8_t  switchA, switchB, switchC;
+uint8_t  switchA, switchB, switchC, SWITCH;
+
+volatile uint32_t cycle_counter = 0;    // Current cycle counter (us)
+volatile uint32_t sub_counter = 0;      // B pulse counter
+volatile uint32_t total_cycles = 0;     // Total cycle number
+uint16_t paramA = 100, paramB = 200;    // Mixing ratio (number of pulses)
+uint16_t mix_count = 5000;                 // Mixing count
+uint16_t pwm_freq = 100;                // PWM frequency (Hz), 50-400 Hz
+const uint32_t timer_interval = 250;     // Timer interrupt interval (us)
 
 
 void timer3_init(uint32_t interval_ms);
@@ -72,7 +82,8 @@ void update_modbus_variables(void)
 
     switchA = (ucRegCoilsBuf[0] & 0x01) ? 1 : 0; // 10001 (1x0000) 
     switchB = (ucRegCoilsBuf[0] & 0x02) ? 1 : 0; // 10002 (1x0001) 
-    switchC = (ucRegCoilsBuf[0] & 0x04) ? 1 : 0; // 10003 (1x0002) 
+    switchC = (ucRegCoilsBuf[0] & 0x04) ? 1 : 0; // 10004 (1x0004) 
+		SWITCH = (ucRegCoilsBuf[0] & 0x05) ? 1 : 0; // 10005 (1x0005)
 	}
 	
 	
@@ -88,6 +99,7 @@ ExitCriticalSection( void )
 {
   __enable_irq();
 }
+
 
 /*!
     \brief      configure the GPIO ports
@@ -122,13 +134,6 @@ volatile PWM_CHANNEL pwm_channels[2] = {
 };
 
 
-volatile uint32_t cycle_counter = 0;    // Current cycle counter (us)
-volatile uint32_t sub_counter = 0;      // B pulse counter
-volatile uint32_t total_cycles = 0;     // Total cycle number
-uint16_t paramA = 100, paramB = 200;    // Mixing ratio (number of pulses)
-uint16_t mix_count = 5;                 // Mixing count
-uint16_t pwm_freq = 100;                // PWM frequency (Hz), 50-400 Hz
-const uint32_t timer_interval = 250;     // Timer interrupt interval (us)
 
 
 void timer3_init(uint32_t interval_us)
@@ -141,7 +146,7 @@ void timer3_init(uint32_t interval_us)
     timer_initpara.prescaler = 120 - 1; // 120MHz / 120 = 1MHz
     timer_initpara.alignedmode = TIMER_COUNTER_EDGE;
     timer_initpara.counterdirection = TIMER_COUNTER_UP;
-    timer_initpara.period = (interval_us * 1000) / (120 / (120 - 1)) - 1; // Match interval (us)
+    timer_initpara.period = interval_us - 1; // Match interval (us)
     timer_initpara.clockdivision = TIMER_CKDIV_DIV1;
     timer_initpara.repetitioncounter = 0;
     timer_init(TIMER3, &timer_initpara);
@@ -175,12 +180,14 @@ void TIMER3_IRQHandler(void)
             pwm_channels[1].sub_counter = 0; // Reset B pulse counter
         }
 
-        // Channel A (controls Half-Bridge 1)
+				if(SWITCH){
+        // Channel A (controls Half-Bridge 1)	
         if (switchA)
         {
             uint32_t pulse_width_A = (0.5 * (T / (paramA / 100))); // A pulse width
-            uint32_t dead_time = pulse_width_A / 15; // Dead time as 1/15 of pulse width
-
+            uint32_t dead_time = (pulse_width_A / 15) > MIN_DEAD_TIME ? (pulse_width_A / 15) : MIN_DEAD_TIME; // Dead time as 1/15 of pulse width
+						
+					
             // High side (PA8) and Low side (PB13) complementary
             if (cycle_counter < pulse_width_A && pwm_channels[0].sub_counter == 0)
             {
@@ -257,10 +264,8 @@ void TIMER3_IRQHandler(void)
             gpio_bit_reset(GPIOB, pwm_channels[1].pin_low); // PB14 low
         }
     }
+		}
 }
-
-
-
 
 
 /*!
@@ -282,13 +287,20 @@ int main(void)
 	/* Enable the Modbus Protocol Stack. */
 	eMBEnable();
    
-		timer3_init(timer_interval); // 50us interval
+		timer3_init(timer_interval); // 250us interval
 		timer3_nvic();	
 	
+	/*     */
+	gpio_bit_set(GPIOB,GPIO_PIN_9);
+	
+	
+	gpio_bit_reset(GPIOB,GPIO_PIN_9);
+	/*     */
    for( ;; )
     {
         ( void )eMBPoll(  );
 		update_modbus_variables();
+			
 		}	
 			
 }
