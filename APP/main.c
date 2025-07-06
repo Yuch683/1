@@ -102,22 +102,25 @@ void gpio_config(void)
 	  rcu_periph_clock_enable(RCU_GPIOB);
     rcu_periph_clock_enable(RCU_AF);
 
-    /*Configure PA0 PA1 PA2 as alternate function*/
 	gpio_init(GPIOA,GPIO_MODE_AF_PP,GPIO_OSPEED_50MHZ,GPIO_PIN_8|GPIO_PIN_9|GPIO_PIN_10);
 	gpio_init(GPIOB,GPIO_MODE_AF_PP,GPIO_OSPEED_50MHZ,GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_15);
 	
 }
 
+
 typedef struct {
     uint32_t pin_high;  // High-level GPIO configuration
     uint32_t pin_low;   // Low-level GPIO configuration
     uint8_t state;      // Current state (0: low level, 1: high level)
+		volatile uint32_t sub_counter;   // Independent pulse counter
 } PWM_CHANNEL;
+
 
 volatile PWM_CHANNEL pwm_channels[2] = {
     {GPIO_PIN_8, GPIO_PIN_13, 0},  // CHANNEL_A (PA8, PB13)
     {GPIO_PIN_9, GPIO_PIN_14, 0}   // CHANNEL_B (PA9, PB14)
 };
+
 
 volatile uint32_t cycle_counter = 0;    // Current cycle counter (us)
 volatile uint32_t sub_counter = 0;      // B pulse counter
@@ -125,7 +128,8 @@ volatile uint32_t total_cycles = 0;     // Total cycle number
 uint16_t paramA = 100, paramB = 200;    // Mixing ratio (number of pulses)
 uint16_t mix_count = 5;                 // Mixing count
 uint16_t pwm_freq = 100;                // PWM frequency (Hz), 50-400 Hz
-const uint32_t timer_interval = 50;     // Timer interrupt interval (us)
+const uint32_t timer_interval = 250;     // Timer interrupt interval (us)
+
 
 void timer3_init(uint32_t interval_us)
 {
@@ -151,69 +155,109 @@ void timer3_nvic(void)
     nvic_irq_enable(TIMER3_IRQn, 1, 0); 
 }
 
-/*-------------------------------------------------  ---------------------------------------------------*/
+
+/*----------------------------------------------------------------------------------------------*/
 void TIMER3_IRQHandler(void)
 {
     if (timer_interrupt_flag_get(TIMER3, TIMER_INT_UP) != RESET)
     {
         timer_interrupt_flag_clear(TIMER3, TIMER_INT_UP);
 
-        // Increase cycle counter (unit: us)
+        // Update global cycle counter
         cycle_counter += timer_interval;
         uint32_t T = 1000000 / pwm_freq; // Cycle period (us)
         if (cycle_counter >= T)
         {
             cycle_counter = 0;
-            sub_counter = 0; // Reset B pulse counter
             total_cycles++;
-            if (total_cycles >= mix_count)
-            {
-                total_cycles = 0;
-            }
+            if (total_cycles >= mix_count) total_cycles = 0;
+            pwm_channels[0].sub_counter = 0; // Reset A pulse counter
+            pwm_channels[1].sub_counter = 0; // Reset B pulse counter
         }
 
-        // Calculate pulse width and interval
-        uint32_t pulse_width = (0.5 * (T / (paramB / 100))); // us
-        uint32_t pulse_interval = T / (paramB / 100);        // us
-
-        // Channel A (base)
-        if (cycle_counter < pulse_width && sub_counter == 0) // A initial high level
+        // Channel A (controls Half-Bridge 1)
+        if (switchA)
         {
-            pwm_channels[0].state = 1;
-            gpio_bit_set(GPIOA, pwm_channels[0].pin_high);
-            gpio_bit_reset(GPIOB, pwm_channels[0].pin_low);
+            uint32_t pulse_width_A = (0.5 * (T / (paramA / 100))); // A pulse width
+            uint32_t dead_time = pulse_width_A / 15; // Dead time as 1/15 of pulse width
+
+            // High side (PA8) and Low side (PB13) complementary
+            if (cycle_counter < pulse_width_A && pwm_channels[0].sub_counter == 0)
+            {
+                pwm_channels[0].state = 1; // High side on
+                gpio_bit_set(GPIOA, pwm_channels[0].pin_high); // PA8 high
+                gpio_bit_reset(GPIOB, pwm_channels[0].pin_low); // PB13 low
+            }
+            else if (cycle_counter >= pulse_width_A && cycle_counter < (pulse_width_A + dead_time))
+            {
+                // Dead time after high side turns off
+                pwm_channels[0].state = 0;
+                gpio_bit_reset(GPIOA, pwm_channels[0].pin_high); // PA8 low
+                gpio_bit_reset(GPIOB, pwm_channels[0].pin_low); // PB13 low (dead time)
+            }
+            else if (cycle_counter >= (pulse_width_A + dead_time) && cycle_counter < T)
+            {
+                pwm_channels[0].state = 0; // Low side on
+                gpio_bit_reset(GPIOA, pwm_channels[0].pin_high); // PA8 low
+                gpio_bit_set(GPIOB, pwm_channels[0].pin_low); // PB13 high
+            }
+            else if (cycle_counter >= (T - dead_time) && cycle_counter < T)
+            {
+                // Dead time before high side turns on again
+                pwm_channels[0].state = 0;
+                gpio_bit_reset(GPIOA, pwm_channels[0].pin_high); // PA8 low
+                gpio_bit_reset(GPIOB, pwm_channels[0].pin_low); // PB13 low (dead time)
+            }
         }
         else
         {
             pwm_channels[0].state = 0;
-            gpio_bit_reset(GPIOA, pwm_channels[0].pin_high);
-            gpio_bit_set(GPIOB, pwm_channels[0].pin_low);
+            gpio_bit_reset(GPIOA, pwm_channels[0].pin_high); // PA8 low
+            gpio_bit_reset(GPIOB, pwm_channels[0].pin_low); // PB13 low
         }
 
-        // Channel B (continuous PWM)
-        if (sub_counter < (paramB / 100))
+        // Channel B (controls Half-Bridge 2)
+        if (switchB)
         {
-            if (cycle_counter % pulse_interval < pulse_width || 
-                (cycle_counter < pulse_width && sub_counter == 0))
+            uint32_t pulse_width_B = (0.5 * (T / (paramB / 100))); // B pulse width
+            uint32_t dead_time = pulse_width_B / 15; // Dead time as 1/15 of pulse width
+
+            // High side (PA9) and Low side (PB14) complementary
+            if (cycle_counter < pulse_width_B && pwm_channels[1].sub_counter == 0)
             {
-                pwm_channels[1].state = 1;
-                gpio_bit_set(GPIOA, pwm_channels[1].pin_high);
-                gpio_bit_reset(GPIOB, pwm_channels[1].pin_low);
-                sub_counter++;
+                pwm_channels[1].state = 1; // High side on
+                gpio_bit_set(GPIOA, pwm_channels[1].pin_high); // PA9 high
+                gpio_bit_reset(GPIOB, pwm_channels[1].pin_low); // PB14 low
             }
-            else
+            else if (cycle_counter >= pulse_width_B && cycle_counter < (pulse_width_B + dead_time))
             {
+                // Dead time after high side turns off
                 pwm_channels[1].state = 0;
-                gpio_bit_reset(GPIOA, pwm_channels[1].pin_high);
-                gpio_bit_set(GPIOB, pwm_channels[1].pin_low);
+                gpio_bit_reset(GPIOA, pwm_channels[1].pin_high); // PA9 low
+                gpio_bit_reset(GPIOB, pwm_channels[1].pin_low); // PB14 low (dead time)
             }
+            else if (cycle_counter >= (pulse_width_B + dead_time) && cycle_counter < T)
+            {
+                pwm_channels[1].state = 0; // Low side on
+                gpio_bit_reset(GPIOA, pwm_channels[1].pin_high); // PA9 low
+                gpio_bit_set(GPIOB, pwm_channels[1].pin_low); // PB14 high
+            }
+            else if (cycle_counter >= (T - dead_time) && cycle_counter < T)
+            {
+                // Dead time before high side turns on again
+                pwm_channels[1].state = 0;
+                gpio_bit_reset(GPIOA, pwm_channels[1].pin_high); // PA9 low
+                gpio_bit_reset(GPIOB, pwm_channels[1].pin_low); // PB14 low (dead time)
+            }
+        }
+        else
+        {
+            pwm_channels[1].state = 0;
+            gpio_bit_reset(GPIOA, pwm_channels[1].pin_high); // PA9 low
+            gpio_bit_reset(GPIOB, pwm_channels[1].pin_low); // PB14 low
         }
     }
 }
-
-
-
-
 
 
 
