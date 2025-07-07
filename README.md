@@ -1,3 +1,4 @@
 # 1
-freemodbus移植是按照CSDN上的文章做的
 本项目是想用软件生成的三组PWM信号控制三个半桥电路，并且能够通过modbus协议和上位机（触摸屏）进行通信，用触摸屏更改PWM参数。
+采用的是GD32f303cbt6单片机。代码是基于GigaDevice提供的gd32f30x库函数。
+freemodbus移植是按照CSDN上的文章做的
