@@ -6,6 +6,8 @@
 #include "mbport.h"
 #include "mbutils.h"
 
+
+
 //Input Registers start address
 #define REG_INPUT_START       0x0000
 //Input Registers number
@@ -15,22 +17,34 @@
 //Holding Registers number
 #define REG_HOLDING_NREGS     8
 
-//...please search in the package
+//  REG_COILS
 #define REG_COILS_START       0x0000
-
 #define REG_COILS_SIZE        16
-/*
+
 #define REG_COILS_START1      0x1000
-
 #define REG_COILS_SIZE        16
-*/
 
-#define REG_DISCRETE_START    0x0000
+#define REG_COILS_START2      0x1000
+#define REG_COILS_SIZE        16
+
+#define REG_COILS_START3      0x2000
+#define REG_COILS_SIZE        16
+
+#define REG_COILS_START4      0x8000
+#define REG_COILS_SIZE        16
+
+//REG_DISCRETE
+#define REG_DISCRETE_START    0x3000
 
 #define REG_DISCRETE_SIZE     16
 
 #define  MIN_DEAD_TIME    5
                    
+#define SWITCH_A_BIT 0
+#define SWITCH_B_BIT 1
+#define SWITCH_C_BIT 2
+#define MASTER_SW_BIT 5 									 
+
 
 uint16_t usRegInputBuf[REG_INPUT_NREGS] = {0x1000,0x1001,0x1002,0x1003,0x1004,0x1005,0x1006,0x1007};
 
@@ -63,31 +77,6 @@ uint16_t mix_count = 5000;                 // Mixing count
 uint16_t pwm_freq = 100;                // PWM frequency (Hz), 50-400 Hz
 const uint32_t timer_interval = 250;     // Timer interrupt interval (us)
 
-
-void timer3_init(uint32_t interval_ms);
-void timer3_nvic(void);
-void gpio_config(void);
-
-
-void update_modbus_variables(void) 
-	{
-
-    paramA    = usRegHoldingBuf[0];  // 40001 (4x0000)
-    paramB    = usRegHoldingBuf[1];  // 40002 (4x0001)
-    paramC    = usRegHoldingBuf[2];  // 40003 (4x0002)
-    phaseB    = usRegHoldingBuf[3];  // 40004 (4x0003)
-    phaseC    = usRegHoldingBuf[4];  // 40005 (4x0004)
-    pwm_freq  = usRegHoldingBuf[6];  // 40007 (4x0006) 
-    mix_count = usRegHoldingBuf[7];  // 40008 (4x0007)
-
-    switchA = (ucRegCoilsBuf[0] & 0x01) ? 1 : 0; // 10001 (1x0000) 
-    switchB = (ucRegCoilsBuf[0] & 0x02) ? 1 : 0; // 10002 (1x0001) 
-    switchC = (ucRegCoilsBuf[0] & 0x04) ? 1 : 0; // 10004 (1x0004) 
-		SWITCH = (ucRegCoilsBuf[0] & 0x05) ? 1 : 0; // 10005 (1x0005)
-	}
-	
-	
-
 void
 EnterCriticalSection( void )
 {
@@ -99,6 +88,35 @@ ExitCriticalSection( void )
 {
   __enable_irq();
 }
+
+void timer3_init(uint32_t interval_ms);
+void timer3_nvic(void);
+void gpio_config(void);
+
+
+void update_modbus_variables(void) 
+	{
+EnterCriticalSection();
+		
+    paramA    = usRegHoldingBuf[0];  // 40001 (4x0000)
+    paramB    = usRegHoldingBuf[1];  // 40002 (4x0001)
+    paramC    = usRegHoldingBuf[2];  // 40003 (4x0002)
+    phaseB    = usRegHoldingBuf[3];  // 40004 (4x0003)
+    phaseC    = usRegHoldingBuf[4];  // 40005 (4x0004)
+    pwm_freq  = usRegHoldingBuf[6];  // 40007 (4x0006) 
+    mix_count = usRegHoldingBuf[7];  // 40008 (4x0007)
+
+    switchA = (ucRegCoilsBuf[0] >> SWITCH_A_BIT) & 0x01; // 10001 (1x0000)
+    switchB = (ucRegCoilsBuf[0] >> SWITCH_B_BIT) & 0x01; // 10002 (1x0001)
+    switchC = (ucRegCoilsBuf[0] >> SWITCH_C_BIT) & 0x01; // 10004 (1x0004)
+		SWITCH = (ucRegCoilsBuf[0] >> MASTER_SW_BIT) & 0x01; // 10005 (1x0005)
+		
+		if(paramA < 1) paramA = 1;
+		if(paramB < 1) paramB = 1;
+ExitCriticalSection();
+	}
+	
+	
 
 
 /*!
@@ -132,8 +150,6 @@ volatile PWM_CHANNEL pwm_channels[2] = {
     {GPIO_PIN_8, GPIO_PIN_13, 0},  // CHANNEL_A (PA8, PB13)
     {GPIO_PIN_9, GPIO_PIN_14, 0}   // CHANNEL_B (PA9, PB14)
 };
-
-
 
 
 void timer3_init(uint32_t interval_us)
@@ -180,6 +196,16 @@ void TIMER3_IRQHandler(void)
             pwm_channels[1].sub_counter = 0; // Reset B pulse counter
         }
 
+				if (!SWITCH)
+        {
+            pwm_channels[0].state = 0;
+            gpio_bit_reset(GPIOA, pwm_channels[0].pin_high); // PA8 low
+            gpio_bit_reset(GPIOB, pwm_channels[0].pin_low); // PB13 low
+            pwm_channels[1].state = 0;
+            gpio_bit_reset(GPIOA, pwm_channels[1].pin_high); // PA9 low
+            gpio_bit_reset(GPIOB, pwm_channels[1].pin_low); // PB14 low
+            return; // Exit if master switch is off
+        }
 				if(SWITCH){
         // Channel A (controls Half-Bridge 1)	
         if (switchA)
@@ -227,7 +253,7 @@ void TIMER3_IRQHandler(void)
         if (switchB)
         {
             uint32_t pulse_width_B = (0.5 * (T / (paramB / 100))); // B pulse width
-            uint32_t dead_time = pulse_width_B / 15; // Dead time as 1/15 of pulse width
+            uint32_t dead_time = ( pulse_width_B / 15 ) > MIN_DEAD_TIME ? (pulse_width_B / 15) : MIN_DEAD_TIME;// Dead time as 1/15 of pulse width
 
             // High side (PA9) and Low side (PB14) complementary
             if (cycle_counter < pulse_width_B && pwm_channels[1].sub_counter == 0)
@@ -282,20 +308,14 @@ int main(void)
 	systick_config();
 	gpio_config();
 
-	__disable_irq();
 	eMBInit(MB_RTU, 0x01, 2, 9600, MB_PAR_NONE); 
 	/* Enable the Modbus Protocol Stack. */
 	eMBEnable();
-   
-		timer3_init(timer_interval); // 250us interval
+	
+   		timer3_init(timer_interval); // 250us interval
 		timer3_nvic();	
+
 	
-	/*     */
-	gpio_bit_set(GPIOB,GPIO_PIN_9);
-	
-	
-	gpio_bit_reset(GPIOB,GPIO_PIN_9);
-	/*     */
    for( ;; )
     {
         ( void )eMBPoll(  );
