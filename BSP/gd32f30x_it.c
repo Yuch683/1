@@ -134,4 +134,14 @@ void PendSV_Handler(void)
     \param[out] none
     \retval     none
 */
-
+/*!
+    \brief      this function handles SysTick exception
+    \param[in]  none
+    \param[out] none
+    \retval     none
+*/
+void SysTick_Handler(void)
+{
+    //TMR_1MS_FG = TRUE;
+    delay_decrement();
+}
